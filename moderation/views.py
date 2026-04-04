@@ -26,10 +26,22 @@ def moderation_home(request):
         .order_by("-created")
     )
 
+    # EXCLUT les logs techniques parasites pour le dashboard
+    recent_logs = (
+        ModerationLog.objects.exclude(
+            target_field__in=["processed", "rejection_reason", "statut"]
+        )
+        .select_related("user", "content_type")
+        .order_by("-timestamp")[:15]
+    )
+
     return render(
         request,
         "moderation/home.html",
-        {"pending_requests": pending_requests},
+        {
+            "pending_requests": pending_requests,
+            "recent_logs": recent_logs,
+        },
     )
 
 
@@ -42,21 +54,18 @@ def process_request(request, request_id):
     action = request.POST.get("action")
     target_user = rep_request.user
 
-    # Dictionnaire des modifications pour le système de logs
-    log_values = {"processed": (False, True)}
-
     if action == "accept":
         # Vérifie qu'il n'a pas déjà les droits (au cas où un autre modo l'a déjà fait)
-        # Si les 2 modos font la meme chose en meme temps
+        # si au meme moment des modo font la meme action
         if not target_user.is_staff and not target_user.is_moderator:
             target_user.is_moderator = True
             target_user.save()
 
-            # Création du log de modération
+            # LOG SÉMANTIQUE D'ACCEPTATION
             ModerationLog.track(
                 user=request.user,
-                content_object=target_user,
-                values={"is_moderator": (False, True)},
+                content_object=rep_request,
+                values={"action_accepter": ("", "Acceptée")},
             )
             messages.success(
                 request,
@@ -72,19 +81,20 @@ def process_request(request, request_id):
         # On récupère la raison du refus
         reason = request.POST.get("rejection_reason", "").strip()
         rep_request.rejection_reason = reason
-        if reason:
-            log_values["rejection_reason"] = ("", reason)
+
+        # LOG SÉMANTIQUE DE REFUS
+        ModerationLog.track(
+            user=request.user,
+            content_object=rep_request,
+            values={"action_rejeter": ("", reason if reason else "Sans motif")},
+        )
 
         messages.warning(
             request,
             f"La demande de {target_user.netid} a été refusée.",
         )
 
-    # On logue que la demande a été traitée (et potentiellement la raison)
-    ModerationLog.track(
-        user=request.user, content_object=rep_request, values=log_values
-    )
-
+    # On marque comme traité, sans logger ça techniquement
     rep_request.processed = True
     rep_request.save()
 
@@ -97,7 +107,7 @@ def moderators_management(request):
     if request.method == "POST":
         action = request.POST.get("action")
 
-        # ACTION : AJOUTER UN MODÉRATEUR
+        # ACTION : AJOUTER UN MODÉRATEUR DEPUIS LE DASHBOARD DE GESTION
         if action == "add":
             netid_to_add = request.POST.get("netid", "").strip()
             if netid_to_add:
@@ -109,7 +119,7 @@ def moderators_management(request):
                         target_user.is_moderator = True
                         target_user.save()
 
-                        # ON CRÉE LE LOG ICI
+                        # LOG TECHNIQUE DE PROMOTION DIRECTE
                         ModerationLog.track(
                             user=request.user,
                             content_object=target_user,
@@ -137,7 +147,6 @@ def moderators_management(request):
             target_user = get_object_or_404(User, id=user_id)
 
             # Sécurité : impossible de toucher à un Admin ou de se retirer soi-même
-            # Gerer dans le Html en desactivant les boutons, mais on double la sécurité ici
             if target_user.is_staff:
                 messages.warning(
                     request,
@@ -151,7 +160,7 @@ def moderators_management(request):
                 target_user.is_moderator = False
                 target_user.save()
 
-                # ON CRÉE LE LOG ICI
+                # LOG TECHNIQUE DE RÉTROGRADATION
                 ModerationLog.track(
                     user=request.user,
                     content_object=target_user,
